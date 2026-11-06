@@ -160,6 +160,9 @@ jobs:
           ffmpeg_args=(
             --lts
             --full
+            # FFmpeg configure rejects enabling GnuTLS and OpenSSL together.
+            # Keep OpenSSL (also used by the SRT TLS build) and disable GnuTLS.
+            --disable-lib-gnutls
             --api-level=24
             --disable-arm-v7a-neon
             --disable-arm64-v8a
