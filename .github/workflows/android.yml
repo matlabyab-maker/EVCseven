@@ -29,10 +29,66 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK and NDK
+      - name: Set up Android SDK tools and platform
         uses: android-actions/setup-android@v3
         with:
-          packages: "platform-tools platforms;android-35 build-tools;35.0.0 ndk;27.2.12479018"
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
+
+      # NDK remains a required build dependency. Install the exact pinned
+      # r27c package manually because sdkmanager returned a corrupt ZIP.
+      - name: Download, validate, and install required Android NDK r27c
+        shell: bash
+        run: |
+          set -euo pipefail
+          NDK_VERSION="27.2.12479018"
+          NDK_URL="https://dl.google.com/android/repository/android-ndk-r27c-linux.zip"
+          NDK_ARCHIVE="$RUNNER_TEMP/android-ndk-r27c-linux.zip"
+          NDK_EXTRACT="$RUNNER_TEMP/ndk-extract"
+          NDK_PARENT="$ANDROID_HOME/ndk"
+          mkdir -p "$NDK_PARENT"
+          rm -rf "$NDK_PARENT/$NDK_VERSION"
+
+          # Retry both transport failures and archives that fail ZIP testing.
+          # Each failed attempt is discarded before a fresh download.
+          valid=false
+          for attempt in 1 2 3 4 5 6; do
+            echo "Downloading Android NDK r27c (attempt $attempt/6)"
+            rm -f "$NDK_ARCHIVE"
+            rm -rf "$NDK_EXTRACT"
+            mkdir -p "$NDK_EXTRACT"
+            if curl --fail --location --show-error \
+                --retry 3 --retry-all-errors --retry-delay 5 \
+                --connect-timeout 30 --max-time 1800 \
+                "$NDK_URL" --output "$NDK_ARCHIVE"; then
+              if unzip -tq "$NDK_ARCHIVE" >/dev/null 2>&1; then
+                valid=true
+                break
+              fi
+              echo "NDK archive is corrupt; discarding and retrying." >&2
+              file "$NDK_ARCHIVE" >&2 || true
+              ls -lh "$NDK_ARCHIVE" >&2 || true
+            else
+              echo "NDK download failed; retrying." >&2
+            fi
+            sleep 5
+          done
+          if [ "$valid" != true ]; then
+            echo "Could not obtain a valid NDK ZIP after 6 attempts." >&2
+            exit 1
+          fi
+
+          unzip -q "$NDK_ARCHIVE" -d "$NDK_EXTRACT"
+          NDK_SOURCE="$NDK_EXTRACT/android-ndk-r27c"
+          test -s "$NDK_SOURCE/source.properties"
+          grep -q "Pkg.Revision = $NDK_VERSION" "$NDK_SOURCE/source.properties"
+          test -x "$NDK_SOURCE/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          test -x "$NDK_SOURCE/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang"
+
+          mv "$NDK_SOURCE" "$NDK_PARENT/$NDK_VERSION"
+          echo "ANDROID_NDK_HOME=$NDK_PARENT/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK_PARENT/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "NDK installed and verified:"
+          grep "Pkg.Revision" "$NDK_PARENT/$NDK_VERSION/source.properties"
 
       - name: Install FFmpegKit build prerequisites
         run: |

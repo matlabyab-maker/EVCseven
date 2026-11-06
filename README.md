@@ -34,7 +34,7 @@ This ZIP is a clean project import. It intentionally contains **no `.git` direct
 
 ## ARMv7 FFmpeg build
 
-The app uses a local FFmpegKit AAR built by GitHub Actions for `armeabi-v7a`. The workflow builds from maintained source tag `v6.0.4-lts-android` using Android NDK `27.2.12479018`, with Android API level 24. The build script is expected at `android-6.0-lts/android.sh`; the workflow checks this path and the NDK compiler before building.
+The app uses a local FFmpegKit AAR built by GitHub Actions for `armeabi-v7a`. The workflow builds from maintained source tag `v6.0.4-lts-android` using the required Android NDK `27.2.12479018`, with Android API level 24. The NDK is not removed or optional: CI downloads the official r27c archive, retries and validates it, then installs it side-by-side under the Android SDK. The build script is expected at `android-6.0-lts/android.sh`; the workflow checks this path and the NDK compiler before building.
 
 The workflow passes FFmpegKit arguments as a Bash array, expects exactly one generated AAR, copies it to `app/libs/ffmpeg-kit-full.aar`, and verifies that the archive contains ARMv7 native libraries without 64-bit or x86 ABIs. This AAR is generated during CI and is not committed in the source ZIP.
 
@@ -45,7 +45,7 @@ The workflow passes FFmpegKit arguments as a Bash array, expects exactly one gen
 - Native ABI remains restricted to `armeabi-v7a`.
 - Minimum SDK remains 24; Java and Kotlin targets remain 17.
 - The current Split implementation and its existing safeguards are retained without feature changes.
-- The workflow builds the native FFmpegKit dependency before running `assembleDebug` and uploads the resulting debug APK as an artifact.
+- The workflow explicitly installs and verifies the required NDK (including the API-24 ARMv7 compiler), builds the native FFmpegKit dependency, and then runs `assembleDebug` and uploads the resulting debug APK as an artifact.
 
 ## Verification status
 
