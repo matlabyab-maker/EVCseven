@@ -1,0 +1,174 @@
+name: EVCseven Android Build
+
+# Trigger on pushes to every branch so MGit branch names cannot suppress Actions.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evcseven-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ARMv7 FFmpeg and Android APK
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout EVCseven
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK and NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0 ndk;27.2.12479018"
+
+      - name: Install FFmpegKit build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool pkg-config curl git doxygen nasm cmake gcc gperf texinfo yasm bison autogen wget autopoint meson ninja-build ragel groff gtk-doc-tools libtasn1-6-dev libtasn1-bin
+
+      - name: Verify ASN.1 parser prerequisite
+        run: |
+          command -v asn1Parser
+          asn1Parser --help >/dev/null 2>&1 || true
+
+      - name: Build FFmpegKit for 32-bit ARM only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v6.0.4-lts-android https://github.com/ffmpegkit-maintained/ffmpeg.git "$RUNNER_TEMP/ffmpegkit"
+
+          # In this tag, android.sh lives inside android-6.0-lts/, not the
+          # repository root. Run it from that directory because its scripts
+          # and prebuilt output paths are relative to its own directory.
+          FFMPEG_BUILD_DIR="$RUNNER_TEMP/ffmpegkit/android-6.0-lts"
+          if [ ! -f "$FFMPEG_BUILD_DIR/android.sh" ]; then
+            echo "FFmpegKit android.sh not found at expected tag path: $FFMPEG_BUILD_DIR" >&2
+            echo "Available build scripts:" >&2
+            find "$RUNNER_TEMP/ffmpegkit" -maxdepth 4 -type f -name 'android.sh' -print >&2 || true
+            exit 1
+          fi
+          cd "$FFMPEG_BUILD_DIR"
+
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          export ANDROID_NDK_ROOT="$ANDROID_HOME/ndk/27.2.12479018"
+          # Hosted runners may predefine ANDROID_NDK_HOME to a different
+          # side-by-side NDK. Force every NDK variable to one installation.
+          export ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
+          export NDK_HOME="$ANDROID_NDK_ROOT"
+          if [ ! -s "$ANDROID_NDK_ROOT/source.properties" ]; then
+            echo "Android NDK source.properties not found: $ANDROID_NDK_ROOT" >&2
+            find "$ANDROID_HOME/ndk" -maxdepth 2 -name source.properties -print >&2 || true
+            exit 1
+          fi
+          grep -q 'Pkg.Revision = 27.2.12479018' "$ANDROID_NDK_ROOT/source.properties" || {
+            cat "$ANDROID_NDK_ROOT/source.properties" >&2
+            echo "Unexpected NDK revision" >&2
+            exit 1
+          }
+
+          TOOLCHAIN_BIN="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          if [ ! -x "$TOOLCHAIN_BIN/clang" ]; then
+            echo "NDK clang compiler missing: $TOOLCHAIN_BIN/clang" >&2
+            exit 1
+          fi
+          export PATH="$TOOLCHAIN_BIN:$PATH"
+          echo "Using NDK: $(grep 'Pkg.Revision' "$ANDROID_NDK_ROOT/source.properties")"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
+
+          # NDK r24+ removed the API-16 ARMv7 compiler wrapper. This app has
+          # minSdk 24, so build at API 24 and verify the compiler first.
+          ARMV7_CC="$TOOLCHAIN_BIN/armv7a-linux-androideabi24-clang"
+          if [ ! -x "$ARMV7_CC" ]; then
+            echo "Required API-24 ARMv7 compiler wrapper is missing: $ARMV7_CC" >&2
+            ls -la "$TOOLCHAIN_BIN" | grep -E 'armv7a-linux-androideabi.*-clang' >&2 || true
+            exit 1
+          fi
+          printf 'int main(void) { return 0; }\n' > "$RUNNER_TEMP/ndk-smoke.c"
+          "$ARMV7_CC" "$RUNNER_TEMP/ndk-smoke.c" -o "$RUNNER_TEMP/ndk-smoke"
+          file "$RUNNER_TEMP/ndk-smoke"
+
+          ffmpeg_args=(
+            --lts
+            --full
+            --api-level=24
+            --disable-arm-v7a-neon
+            --disable-arm64-v8a
+            --disable-x86
+            --disable-x86-64
+          )
+          if ! bash ./android.sh "${ffmpeg_args[@]}"; then
+            echo "FFmpegKit android.sh failed. Build log follows:" >&2
+            if [ -f build.log ]; then
+              tail -n 500 build.log >&2 || true
+            else
+              find . -type f \( -name '*.log' -o -name 'config.log' \) -print
+            fi
+            exit 1
+          fi
+
+          # This source tag names the produced archive ffmpeg-kit.aar
+          # (not ffmpeg-kit-full.aar); locate the actual archive robustly.
+          mapfile -t aar_files < <(find "$FFMPEG_BUILD_DIR/prebuilt" -type f -name '*.aar' -print | sort)
+          if [ "${#aar_files[@]}" -ne 1 ]; then
+            echo "Expected exactly one ARMv7 AAR, found ${#aar_files[@]}" >&2
+            printf '%s\n' "${aar_files[@]}" >&2
+            exit 1
+          fi
+          selected="${aar_files[0]}"
+          mkdir -p "$GITHUB_WORKSPACE/app/libs"
+          cp "$selected" "$GITHUB_WORKSPACE/app/libs/ffmpeg-kit-full.aar"
+          unzip -l "$GITHUB_WORKSPACE/app/libs/ffmpeg-kit-full.aar" > "$RUNNER_TEMP/aar-files.txt"
+          if ! grep -q 'jni/armeabi-v7a/' "$RUNNER_TEMP/aar-files.txt"; then
+            echo "The generated AAR does not contain armeabi-v7a native libraries" >&2
+            cat "$RUNNER_TEMP/aar-files.txt" >&2
+            exit 1
+          fi
+          if grep -Eq 'jni/(arm64-v8a|x86|x86_64)/' "$RUNNER_TEMP/aar-files.txt"; then
+            echo "Unexpected non-ARMv7 ABI found in the generated AAR" >&2
+            exit 1
+          fi
+          echo "Using ARMv7 AAR: $selected"
+
+      - name: Verify project files
+        run: |
+          test -f settings.gradle.kts
+          test -f app/build.gradle.kts
+          test -f app/src/main/AndroidManifest.xml
+          test -s app/libs/ffmpeg-kit-full.aar
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build debug APK
+        run: gradle --no-daemon --stacktrace assembleDebug
+
+      - name: Verify APK contains ARMv7 native FFmpeg
+        run: |
+          unzip -l app/build/outputs/apk/debug/app-debug.apk | grep 'lib/armeabi-v7a/'
+          if unzip -l app/build/outputs/apk/debug/app-debug.apk | grep -Eq 'lib/(arm64-v8a|x86|x86_64)/'; then
+            echo "Unexpected ABI packaged in APK" >&2
+            exit 1
+          fi
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: EVCseven-0.2.196-ARMv7-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
